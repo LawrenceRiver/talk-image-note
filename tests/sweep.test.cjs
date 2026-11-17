@@ -1,0 +1,4 @@
+const test=require('node:test'),assert=require('node:assert/strict');let S;try{S=require('../assets/app/sweep.js')}catch{}
+test('drag creates a continuous block including the space between distant samples',()=>{assert.ok(S,'sweep geometry exists');const r=S.block([100,100],[400,120],12);assert.deepEqual(r,{x:88,y:88,w:324,h:44});assert.deepEqual(S.hits(r,[{id:'middle',x:220,y:100,w:10,h:10}]),['middle'])});
+test('sweep collects every intersecting marker, once per ID, and skips outside markers',()=>{assert.ok(S);const r=S.block([0,0],[100,0],10);assert.deepEqual(S.hits(r,[{id:'a',x:5,y:0,w:1,h:1},{id:'a',x:20,y:0,w:1,h:1},{id:'b',x:60,y:3,w:2,h:2},{id:'outside',x:50,y:30,w:2,h:2}]),['a','b'])});
+test('the same visible brush size applies after zoom because hit testing uses screen coordinates',()=>{assert.ok(S);assert.equal(S.block([100,100],[100,100],14).w,28);assert.equal(S.block([200,200],[200,200],14).w,28)});

@@ -1,0 +1,4 @@
+interface:
+  display_name: "talk-image-&note"
+  short_description: "在原图画布上圈画定位、聊天批注、逐条微调，并保存可编辑记录"
+  default_prompt: "使用 $talk-image-note 打开原图批注画布，保留荧光与排版，按我的口述更新同一条批注。"

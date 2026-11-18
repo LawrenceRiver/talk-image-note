@@ -4,6 +4,12 @@
 
 保留原件排版和高亮；支持注意点、圈线、旁批拖拽与缩放、翻页、撤销、最近删除、单条／整页复制、PNG 导出，以及内嵌图片的可编辑 HTML。
 
+## Contributors
+
+<a href="https://github.com/jason0917-eng"><img src="https://avatars.githubusercontent.com/u/211797332?v=4" width="64" height="64" alt="Chen Zhuoxuan (jason0917-eng)"></a>
+
+**[Chen Zhuoxuan · @jason0917-eng](https://github.com/jason0917-eng)** — Windows 适配：无需 Swift／OCR 的图片导入、区域批注及相关保存与导出支持。见 [PR #1](https://github.com/LawrenceRiver/talk-image-note/pull/1)。
+
 ## 安装为 Codex skill
 
 克隆本仓库到 `~/.codex/skills/talk-image-note`。如果那里已经有本地版本，请先保留备份，不直接覆盖。重新加载技能后调用 `$talk-image-note`。

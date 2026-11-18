@@ -1,20 +1,82 @@
 """Import original PNG/JPEG pages without redrawing their visible text."""
-import argparse,hashlib,json,shutil,subprocess,uuid
+import argparse
+import hashlib
+import json
+import subprocess
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
-from datetime import datetime,timezone
+
 from PIL import Image
 
+from vision_ocr import prepare, recognize
+
+
 def main():
- ap=argparse.ArgumentParser();ap.add_argument('--root',required=True);ap.add_argument('images',nargs='+');a=ap.parse_args();root=Path(a.root).resolve();(root/'pages').mkdir(parents=True,exist_ok=True);runtime=root/'.runtime';runtime.mkdir(exist_ok=True);binary=runtime/'ink-ocr';source=Path(__file__).with_name('ocr.swift')
- if not binary.exists() or binary.stat().st_mtime<source.stat().st_mtime:subprocess.run(['swiftc',str(source),'-O','-o',str(binary)],check=True)
- docs=[];digest=hashlib.sha256()
- for i,path in enumerate(a.images):
-  p=Path(path).resolve();b=p.read_bytes();digest.update(b);image=Image.open(p);w,h=image.size;suffix='.png' if image.format=='PNG' else '.jpg' if image.format=='JPEG' else None
-  if suffix is None:raise ValueError('Use PNG or JPEG source images')
-  name=f'p{i+1}-en{suffix}';dest=root/'pages'/name;shutil.copyfile(p,dest);ocr=json.loads(subprocess.check_output([str(binary),str(dest)],text=True));pars=[];boxes=[];docid=f'IMG{i+1:02d}'
-  for j,line in enumerate(ocr['lines']):
-   pid=f'{docid}-P{j+1:03d}';text=line['text'];x,y,bw,bh=line['box'];pars.append({'id':pid,'text':text,'source_shape':None,'source_paragraph':j,'ocr':True});boxes.append({'paragraphId':pid,'start':0,'end':len(text.encode('utf-16-le'))//2,'text':text,'x':x,'y':y,'w':bw,'h':bh})
-  docs.append({'id':docid,'title':p.stem,'page':i+1,'en':pars,'images':{'en':{'url':'/pages/'+name,'width':w,'height':h,'boxes':boxes}},'source_image':str(p)})
- payload={'source':{'title':'Original images','url':'','modified_time':datetime.now(timezone.utc).isoformat(),'sha256':digest.hexdigest(),'kind':'image-ocr'},'documents':docs,'original_images':True}
- (root/'data.json').write_text(json.dumps(payload,ensure_ascii=False,indent=2));print('Imported',len(docs),'unchanged source images')
-if __name__=='__main__':main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--root', required=True)
+    parser.add_argument('--no-ocr', action='store_true', help='Import images without text recognition')
+    parser.add_argument('images', nargs='+')
+    args = parser.parse_args()
+    root = Path(args.root).resolve()
+    pages = root / 'pages'
+
+    inputs = []
+    for path in args.images:
+        source = Path(path).resolve()
+        with Image.open(source) as image:
+            suffix = {'PNG': '.png', 'JPEG': '.jpg'}.get(image.format)
+            if suffix is None:
+                raise ValueError('Use PNG or JPEG source images')
+            image.verify()
+            inputs.append((source, suffix, image.size))
+
+    pages.mkdir(parents=True, exist_ok=True)
+    binary = None if args.no_ocr else prepare(root)
+    documents = []
+    digest = hashlib.sha256()
+    for index, (source, suffix, (width, height)) in enumerate(inputs, start=1):
+        original = source.read_bytes()
+        digest.update(original)
+        name = f'p{index}-en{suffix}'
+        destination = pages / name
+        destination.write_bytes(original)
+        lines = []
+        if binary is not None:
+            try:
+                lines = recognize(binary, destination)['lines']
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                print(f'Page {index}: OCR unavailable: {exc}', file=sys.stderr)
+
+        doc_id = f'IMG{index:02d}'
+        paragraphs = []
+        boxes = []
+        for row, line in enumerate(lines):
+            paragraph_id = f'{doc_id}-P{row + 1:03d}'
+            text = line['text']
+            x, y, w, h = line['box']
+            paragraphs.append({'id': paragraph_id, 'text': text, 'source_shape': None,
+                               'source_paragraph': row, 'ocr': True})
+            boxes.append({'paragraphId': paragraph_id, 'start': 0,
+                          'end': len(text.encode('utf-16-le')) // 2,
+                          'text': text, 'x': x, 'y': y, 'w': w, 'h': h})
+        documents.append({'id': doc_id, 'title': source.stem, 'page': index,
+                          'en': paragraphs, 'source_image': str(source),
+                          'images': {'en': {'url': '/pages/' + name, 'width': width,
+                                            'height': height, 'boxes': boxes}}})
+
+    payload = {
+        'source': {'title': 'Original images', 'url': '',
+                   'modified_time': datetime.now(timezone.utc).isoformat(),
+                   'sha256': digest.hexdigest(), 'kind': 'image-ocr' if binary else 'image'},
+        'documents': documents,
+        'original_images': True,
+    }
+    (root / 'data.json').write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                                    encoding='utf-8')
+    print(f'Imported {len(documents)} unchanged source images' +
+          (' (OCR disabled or unavailable)' if binary is None else ''))
+
+
+if __name__ == '__main__':
+    main()

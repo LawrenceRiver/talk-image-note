@@ -3,11 +3,13 @@ import copy
 import hashlib
 import json
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from zipfile import ZipFile
+from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from bootstrap_workspace import bootstrap
@@ -43,7 +45,7 @@ class WorkflowTests(unittest.TestCase):
         app.write_text('/* user custom UI */')
         with self.assertRaises(ValueError):
             bootstrap(self.root)
-        self.assertEqual(app.read_text(), '/* user custom UI */')
+        self.assertEqual(app.read_text(encoding='utf-8'), '/* user custom UI */')
         bootstrap(self.root, refresh=True)
         self.assertEqual((self.root / 'annotations/draft.json').read_bytes(), before)
 
@@ -64,9 +66,9 @@ class WorkflowTests(unittest.TestCase):
         directory, zipped = archive(self.root)
         self.assertTrue((directory / 'DOC01-editable.html').is_file())
         self.assertEqual((self.root / 'annotations/draft.json').read_bytes(), before)
-        state = json.loads((directory / 'annotations.json').read_text())
+        state = json.loads((directory / 'annotations.json').read_text(encoding='utf-8'))
         self.assertEqual(len(state['deletedAnnotations']), 1)
-        manifest = json.loads((directory / 'manifest.json').read_text())
+        manifest = json.loads((directory / 'manifest.json').read_text(encoding='utf-8'))
         for name, digest in manifest.items():
             self.assertEqual(hashlib.sha256((directory / name).read_bytes()).hexdigest(), digest)
         with ZipFile(zipped) as package:
@@ -74,6 +76,27 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(len(package.namelist()), len(manifest) + 1)
         second, _ = archive(self.root, 'DOC01')
         self.assertNotEqual(second, directory)
+
+    def test_import_without_ocr_and_export_original_jpeg(self):
+        original = self.root / 'synthetic.jpg'
+        Image.new('RGB', (30, 40), 'orange').save(original)
+        importer = Path(__file__).resolve().parents[1] / 'scripts/import_images.py'
+        subprocess.run([sys.executable, str(importer), '--root', str(self.root),
+                        '--no-ocr', str(original)], check=True, capture_output=True)
+        data = json.loads((self.root / 'data.json').read_text(encoding='utf-8'))
+        doc, = data['documents']
+        image = doc['images']['en']
+        self.assertEqual(doc['en'], [])
+        self.assertEqual(image['boxes'], [])
+        self.assertEqual((image['width'], image['height']), (30, 40))
+        self.assertEqual((self.root / image['url'].lstrip('/')).read_bytes(), original.read_bytes())
+
+        html = build_portable(self.root, data, {'annotations': []}, doc['id'])
+        payload = json.loads(re.search(r'<script id="portable-state" type="application/json">(.*?)</script>', html, re.S)[1])
+        embedded = payload['data']['documents'][0]['images']['en']
+        expected = 'data:image/jpeg;base64,' + base64.b64encode(original.read_bytes()).decode('ascii')
+        self.assertEqual(embedded['url'], expected)
+        self.assertEqual(embedded['exportUrl'], expected)
 
     def test_stale_source_refuses_archive(self):
         self.draft['source'] = {'sha256': 'older'}

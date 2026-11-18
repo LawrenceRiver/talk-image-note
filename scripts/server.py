@@ -1,18 +1,16 @@
+from vision_ocr import prepare, recognize
 from portable_export import build_portable
 from reference_model import make_reference,annotate,reference_prompt,make_canvas_reference
-import argparse,base64,json,os,re,subprocess,threading,uuid
+import argparse,base64,json,re,subprocess,threading,uuid
 from datetime import datetime,timezone
 from http.server import ThreadingHTTPServer,BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse
 
 def main():
- ap=argparse.ArgumentParser();ap.add_argument('--root',required=True);ap.add_argument('--port',type=int,default=8847);a=ap.parse_args();root=Path(a.root).resolve();app=root/'app';store=root/'annotations';store.mkdir(exist_ok=True);(store/'ink').mkdir(exist_ok=True);(store/'exports').mkdir(exist_ok=True);runtime=root/'.runtime';runtime.mkdir(exist_ok=True);ocr=runtime/'ink-ocr';lock=threading.Lock()
- if not ocr.exists() or ocr.stat().st_mtime < Path(__file__).with_name('ocr.swift').stat().st_mtime:
-  try:subprocess.run(['swiftc',str(Path(__file__).with_name('ocr.swift')),'-O','-o',str(ocr)],check=True,timeout=90,capture_output=True)
-  except Exception as e: print('OCR unavailable:',str(e),flush=True)
+ ap=argparse.ArgumentParser();ap.add_argument('--root',required=True);ap.add_argument('--port',type=int,default=8847);a=ap.parse_args();root=Path(a.root).resolve();app=root/'app';store=root/'annotations';store.mkdir(exist_ok=True);(store/'ink').mkdir(exist_ok=True);(store/'exports').mkdir(exist_ok=True);ocr=prepare(root);lock=threading.Lock()
  def write(p,obj):
-  tmp=p.with_suffix('.tmp');tmp.write_text(json.dumps(obj,ensure_ascii=False,indent=2));tmp.replace(p)
+  tmp=p.with_suffix('.tmp');tmp.write_text(json.dumps(obj,ensure_ascii=False,indent=2),encoding='utf-8');tmp.replace(p)
  class Handler(BaseHTTPRequestHandler):
   def log_message(self,*args):pass
   def reply(self,obj,status=200):
@@ -20,8 +18,10 @@ def main():
   def do_GET(self):
    path=urlparse(self.path).path
    if path=='/api/draft':
-    p=store/'draft.json';return self.reply(json.loads(p.read_text()) if p.exists() else {})
-   if path=='/api/capabilities':return self.reply({'handwriting':ocr.exists(),'storage':str(store)})
+    with lock:
+     p=store/'draft.json';draft=json.loads(p.read_text(encoding='utf-8')) if p.exists() else {}
+    return self.reply(draft)
+   if path=='/api/capabilities':return self.reply({'handwriting':ocr is not None,'storage':str(store)})
    routes={'/':app/'index.html','/app.js':app/'app.js','/geometry.js':app/'geometry.js','/cards.js':app/'cards.js','/history.js':app/'history.js','/attention.js':app/'attention.js','/sweep.js':app/'sweep.js','/copy-notes.js':app/'copy-notes.js','/style.css':app/'style.css','/data.json':root/'data.json'}
    p=routes.get(path)
    if re.fullmatch(r'/pages/p[0-9]+-(en|zh)(-export)?\.(png|jpg)',path):p=root/path.lstrip('/')
@@ -40,14 +40,14 @@ def main():
      with lock:
       old=store/'draft.json'
       if old.exists():
-       previous=json.loads(old.read_text())
+       previous=json.loads(old.read_text(encoding='utf-8'))
        if previous.get('source',{}).get('sha256')!=d.get('source',{}).get('sha256') and previous.get('annotations'):
         history=store/'history';history.mkdir(exist_ok=True);write(history/(datetime.now().strftime('%Y%m%d-%H%M%S')+'-'+uuid.uuid4().hex[:5]+'.json'),previous)
       write(old,d)
      return self.reply({'saved':True})
     if path=='/api/export-editable':
      with lock:
-      current=json.loads((root/'data.json').read_text());draft=json.loads((store/'draft.json').read_text());doc_id=str(d.get('docId',''));html=build_portable(root,current,draft,doc_id);directory=root/'exports';directory.mkdir(exist_ok=True);filename=doc_id+'-editable-'+datetime.now().strftime('%Y%m%d-%H%M%S')+'-'+uuid.uuid4().hex[:5]+'.html';p=directory/filename;p.write_text(html)
+      current=json.loads((root/'data.json').read_text(encoding='utf-8'));draft=json.loads((store/'draft.json').read_text(encoding='utf-8'));doc_id=str(d.get('docId',''));html=build_portable(root,current,draft,doc_id);directory=root/'exports';directory.mkdir(exist_ok=True);filename=doc_id+'-editable-'+datetime.now().strftime('%Y%m%d-%H%M%S')+'-'+uuid.uuid4().hex[:5]+'.html';p=directory/filename;p.write_text(html,encoding='utf-8')
      return self.reply({'saved':True,'file':str(p),'filename':filename,'url':'/exports/'+filename})
     if path=='/api/export-image':
      image=d.get('image','');doc_id=str(d.get('docId',''))
@@ -62,13 +62,13 @@ def main():
      b=base64.b64decode(image.split(',',1)[1],validate=True)
      if not b.startswith(b'\x89PNG\r\n\x1a\n'):return self.reply({'error':'不是有效PNG'},400)
      p=store/'ink'/(uuid.uuid4().hex+'.png');p.write_bytes(b)
-     if not ocr.exists():return self.reply({'error':'本机手写识别不可用；墨迹已保存，可交给Codex读取','image_path':str(p)},503)
-     result=subprocess.run([str(ocr),str(p)],capture_output=True,text=True,timeout=30)
-     if result.returncode:return self.reply({'error':'识别未完成，墨迹已保存','image_path':str(p)},500)
-     data=json.loads(result.stdout);data['image_path']=str(p);return self.reply(data)
+     if ocr is None:return self.reply({'error':'本机手写识别不可用；墨迹已保存，可交给Codex读取','image_path':str(p)},503)
+     try:data=recognize(ocr,p)
+     except (OSError,subprocess.SubprocessError,ValueError):return self.reply({'error':'识别未完成，墨迹已保存','image_path':str(p)},500)
+     data['image_path']=str(p);return self.reply(data)
     if path=='/api/reference':
      with lock:
-      current=json.loads((root/'data.json').read_text());draft=json.loads((store/'draft.json').read_text());reference=make_reference(current,draft,d.get('id'))
+      current=json.loads((root/'data.json').read_text(encoding='utf-8'));draft=json.loads((store/'draft.json').read_text(encoding='utf-8'));reference=make_reference(current,draft,d.get('id'))
       directory=store/'references';directory.mkdir(exist_ok=True);p=directory/(reference['id']+'.json');write(p,reference);write(store/'latest-reference.json',reference)
      return self.reply({'reference':reference,'file':str(p),'prompt':reference_prompt(reference,p)})
     if path=='/api/reference-image':
@@ -77,10 +77,10 @@ def main():
      raw=base64.b64decode(image.split(',',1)[1],validate=True)
      if not raw.startswith(b'\x89PNG\r\n\x1a\n'):raise ValueError('不是有效PNG')
      with lock:
-      p=store/'references'/(identifier+'.json');reference=json.loads(p.read_text())
+      p=store/'references'/(identifier+'.json');reference=json.loads(p.read_text(encoding='utf-8'))
       if reference.get('referencedAt')!=d.get('referencedAt'):raise ValueError('引用已经更新，请重试')
       image_file=p.with_suffix('.png');image_file.write_bytes(raw);reference['imageFile']=str(image_file);write(p,reference);latest=store/'latest-reference.json'
-      if latest.exists() and json.loads(latest.read_text()).get('id')==identifier:write(latest,reference)
+      if latest.exists() and json.loads(latest.read_text(encoding='utf-8')).get('id')==identifier:write(latest,reference)
      return self.reply({'saved':True,'imageFile':str(image_file)})
     if path=='/api/reference-canvas':
      image=d.get('image','')
@@ -88,21 +88,21 @@ def main():
      raw=base64.b64decode(image.split(',',1)[1],validate=True)
      if not raw.startswith(b'\x89PNG\r\n\x1a\n'):raise ValueError('全图引用不是有效PNG')
      with lock:
-      current=json.loads((root/'data.json').read_text());draft=json.loads((store/'draft.json').read_text());identifier='canvas-'+uuid.uuid4().hex;reference=make_canvas_reference(current,draft,d.get('docId'),identifier);directory=store/'references';directory.mkdir(exist_ok=True);png=directory/(identifier+'.png');png.write_bytes(raw);p=directory/(identifier+'.json');reference['imageFile']=str(png);write(p,reference);write(store/'latest-reference.json',reference)
+      current=json.loads((root/'data.json').read_text(encoding='utf-8'));draft=json.loads((store/'draft.json').read_text(encoding='utf-8'));identifier='canvas-'+uuid.uuid4().hex;reference=make_canvas_reference(current,draft,d.get('docId'),identifier);directory=store/'references';directory.mkdir(exist_ok=True);png=directory/(identifier+'.png');png.write_bytes(raw);p=directory/(identifier+'.json');reference['imageFile']=str(png);write(p,reference);write(store/'latest-reference.json',reference)
       for item in reference['annotations']:write(directory/(item['id']+'.json'),item)
      lines=['[全图引用 '+reference['docId']+'](<'+str(png)+'>)','[全图定位记录](<'+str(p)+'>)','画布ID：'+identifier]
      for ref in reference['annotations']:lines+=['',reference_prompt(ref,directory/(ref['id']+'.json'))]
      return self.reply({'reference':reference,'file':str(p),'imageFile':str(png),'prompt':'\n'.join(lines)})
     if path=='/api/annotate-reference':
      with lock:
-      current=json.loads((root/'data.json').read_text());draft=json.loads((store/'draft.json').read_text());p=store/'references'/(str(d.get('id',''))+'.json') if re.fullmatch(r'[A-Za-z0-9-]+',str(d.get('id',''))) else None
+      current=json.loads((root/'data.json').read_text(encoding='utf-8'));draft=json.loads((store/'draft.json').read_text(encoding='utf-8'));p=store/'references'/(str(d.get('id',''))+'.json') if re.fullmatch(r'[A-Za-z0-9-]+',str(d.get('id',''))) else None
       if not p or not p.exists():raise ValueError('先点击引用这处定位')
-      reference=json.loads(p.read_text());updated=annotate(current,draft,reference,str(d.get('text','')),targets=d.get('targets'),focus_boxes=d.get('focusBoxes'),suggestion=d.get('suggestion'));write(store/'draft.json',updated)
+      reference=json.loads(p.read_text(encoding='utf-8'));updated=annotate(current,draft,reference,str(d.get('text','')),targets=d.get('targets'),focus_boxes=d.get('focusBoxes'),suggestion=d.get('suggestion'));write(store/'draft.json',updated)
      return self.reply({'saved':True,'id':reference['id'],'stage':'annotation'})
     if path=='/api/submit':
      notes=[n for n in d.get('annotations',[]) if not n.get('example') and (str(n.get('note','')).strip() or n.get('attention',{}).get('points'))]
      if not notes:return self.reply({'error':'先写下一条修改意见'},400)
-     current=json.loads((root/'data.json').read_text())
+     current=json.loads((root/'data.json').read_text(encoding='utf-8'))
      if d.get('source',{}).get('sha256')!=current['source']['sha256']:return self.reply({'error':'底稿版本已变化，请先核对旧批注的对应原文'},409)
      docs={x['id']:x for x in current['documents']}
      for note in notes:
@@ -130,7 +130,7 @@ def main():
       if n.get('region'):lines+=['原图：'+n.get('sourceImage',''),'图片选区：'+json.dumps(n['region'],ensure_ascii=False)]
       if n.get('handwritingImage'):lines+=['手写图：'+n['handwritingImage']]
       lines+=['']
-     prompt='\n'.join(lines);(store/'exports'/(stamp+'.md')).write_text(prompt);write(store/'latest-submitted.json',batch)
+     prompt='\n'.join(lines);(store/'exports'/(stamp+'.md')).write_text(prompt,encoding='utf-8');write(store/'latest-submitted.json',batch)
      return self.reply({'saved':True,'file':str(p),'count':len(notes),'prompt':prompt})
     return self.reply({'error':'Not found'},404)
    except Exception as e:return self.reply({'error':str(e)},400)

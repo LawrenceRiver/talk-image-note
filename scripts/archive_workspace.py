@@ -13,8 +13,8 @@ from portable_export import build_portable
 
 def archive(root, doc_id=None):
     root = Path(root).expanduser().resolve()
-    data = json.loads((root / 'data.json').read_text())
-    draft = json.loads((root / 'annotations/draft.json').read_text())
+    data = json.loads((root / 'data.json').read_text(encoding='utf-8'))
+    draft = json.loads((root / 'annotations/draft.json').read_text(encoding='utf-8'))
     if data['source']['sha256'] != draft.get('source', {}).get('sha256'):
         raise ValueError('Source version differs; reconcile the draft before archiving.')
     if doc_id is None:
@@ -28,7 +28,7 @@ def archive(root, doc_id=None):
     stamp = datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:5]
     output = root / 'archives' / (doc_id + '-' + stamp)
     output.mkdir(parents=True, exist_ok=False)
-    (output / (doc_id + '-editable.html')).write_text(html)
+    (output / (doc_id + '-editable.html')).write_text(html, encoding='utf-8')
     state = copy.deepcopy(draft)
     state['annotations'] = [n for n in state.get('annotations', []) if n.get('docId') == doc_id]
     state['deletedAnnotations'] = [n for n in state.get('deletedAnnotations', [])
@@ -36,9 +36,9 @@ def archive(root, doc_id=None):
     state['undoStates'] = []
     state['redoStates'] = []
     state['pageIndex'] = 0
-    (output / 'annotations.json').write_text(json.dumps(state, ensure_ascii=False, indent=2))
+    (output / 'annotations.json').write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding='utf-8')
     (output / 'source-and-page.json').write_text(json.dumps(
-        {'source': data['source'], 'documents': [document]}, ensure_ascii=False, indent=2))
+        {'source': data['source'], 'documents': [document]}, ensure_ascii=False, indent=2), encoding='utf-8')
     originals = output / 'originals'
     originals.mkdir()
     for image in document.get('images', {}).values():
@@ -55,10 +55,10 @@ def archive(root, doc_id=None):
     (output / '使用说明.txt').write_text(
         '这是单篇画布的冻结快照。可编辑HTML已内嵌原图与批注。\n'
         '编辑旁批后请再次导出HTML，再分享新文件；浏览器自动保存不会写回旧HTML。\n'
-        '原件文字仍是图片。实时工作区未被修改。\n')
-    manifest = {str(p.relative_to(output)): hashlib.sha256(p.read_bytes()).hexdigest()
+        '原件文字仍是图片。实时工作区未被修改。\n', encoding='utf-8')
+    manifest = {p.relative_to(output).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
                 for p in output.rglob('*') if p.is_file()}
-    (output / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
+    (output / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
     zip_path = output.with_suffix('.zip')
     with ZipFile(zip_path, 'x', compression=ZIP_DEFLATED) as target:
         for path in output.rglob('*'):
